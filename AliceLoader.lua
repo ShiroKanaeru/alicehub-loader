@@ -1,4 +1,4 @@
--- AliceHUB Loader v2.5.4
+-- AliceHUB Loader v2.5.5
 -- Executor compatibility build
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
@@ -304,22 +304,79 @@ return function(token)
         return nil
     end
 
+    local function looksLikeAliceHubJson(data)
+        if type(data) ~= "table" then return false end
+
+        -- Public AliceHUB API responses always expose an explicit boolean `ok`.
+        if type(data.ok) == "boolean" then
+            return true
+        end
+
+        -- Fallback signatures used by AliceHUB endpoints.
+        if data.session ~= nil or data.lease ~= nil or data.slotMode ~= nil then
+            return true
+        end
+        if data.error ~= nil or data.code ~= nil then
+            return true
+        end
+        if data.service == "AliceHUB API" then
+            return true
+        end
+
+        return false
+    end
+
+    local function jsonSummary(data)
+        if type(data) ~= "table" then return tostring(data) end
+
+        local preferred = {
+            "error", "message", "detail", "code", "status",
+            "reason", "description", "service"
+        }
+
+        local parts = {}
+        for _, key in ipairs(preferred) do
+            local value = data[key]
+            if value ~= nil and type(value) ~= "table" then
+                parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
+            end
+        end
+
+        if #parts == 0 then
+            for key, value in pairs(data) do
+                if type(value) ~= "table" then
+                    parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
+                    if #parts >= 5 then break end
+                end
+            end
+        end
+
+        local out = table.concat(parts, ", ")
+        return responsePreview(out)
+    end
+
     local function getJson(url)
         local candidates = rawHttpCandidates(url)
-        local htmlSamples = {}
+        local rejectedJson = {}
+        local nonJson = {}
         local errors = {}
 
         for _, result in ipairs(candidates) do
             if type(result.body) == "string" and #result.body > 0 then
                 local data = decode(result.body)
                 if data then
-                    Env.AliceHUBLastTransport = result.name
-                    return data, nil, result.name
-                end
+                    if looksLikeAliceHubJson(data) then
+                        Env.AliceHUBLastTransport = result.name
+                        return data, nil, result.name
+                    end
 
-                local preview = responsePreview(result.body)
-                if preview ~= "" then
-                    htmlSamples[#htmlSamples + 1] = result.name .. ": " .. preview
+                    rejectedJson[#rejectedJson + 1] =
+                        result.name .. ": " .. jsonSummary(data)
+                else
+                    local preview = responsePreview(result.body)
+                    if preview ~= "" then
+                        nonJson[#nonJson + 1] = result.name .. ": " .. preview
+                    end
                 end
             elseif result.err and result.err ~= "" then
                 errors[#errors + 1] = result.name .. ": " .. responsePreview(result.err)
@@ -327,15 +384,17 @@ return function(token)
         end
 
         local detail
-        if #htmlSamples > 0 then
-            detail = htmlSamples[1]
+        if #rejectedJson > 0 then
+            detail = "JSON bukan AliceHUB • " .. rejectedJson[1]
+        elseif #nonJson > 0 then
+            detail = "non-JSON • " .. nonJson[1]
         elseif #errors > 0 then
             detail = errors[1]
         else
             detail = "tidak ada transport HTTP yang berhasil"
         end
 
-        return nil, "API non-JSON • " .. detail, nil
+        return nil, "API gagal • " .. detail, nil
     end
 
     local function httpGet(url)
@@ -490,8 +549,18 @@ return function(token)
         if not data then
             return nil, tostring(err or "Response API tidak valid")
         end
-        if not data.ok then
-            return nil, tostring(data.error or data.code or "Authorization gagal")
+        if data.ok ~= true then
+            local reason =
+                data.error
+                or data.message
+                or data.detail
+                or data.reason
+                or data.description
+                or data.code
+                or data.status
+                or jsonSummary(data)
+                or "Authorization gagal"
+            return nil, tostring(reason)
         end
         Env.AliceHUBLastTransport = method
         if type(data.session) ~= "string" or type(data.lease) ~= "string" then
@@ -571,7 +640,7 @@ return function(token)
                     API .. "/client/heartbeat?lease=" .. HttpService:UrlEncode(lease)
                         .. "&t=" .. HttpService:UrlEncode(tostring(os.time()))
                 ))
-                if data and data.ok then
+                if data and data.ok == true then
                     heartbeatOk = true
                     failures = 0
                     heartbeatEvery = math.max(15, tonumber(data.heartbeatEvery) or heartbeatEvery)
