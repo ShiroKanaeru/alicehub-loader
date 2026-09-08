@@ -1,4 +1,4 @@
--- AliceHUB Loader v2.5.2
+-- AliceHUB Loader v2.5.3
 -- Executor compatibility build
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
@@ -133,53 +133,64 @@ return function(token)
         return nil
     end
 
+    local function requestBody(url)
+        local req = executorRequest()
+        if not req then return nil, "request() unavailable" end
+
+        local ok, response = pcall(req, {
+            Url = url,
+            URL = url,
+            Method = "GET",
+            Headers = {
+                ["Cache-Control"] = "no-cache",
+                ["User-Agent"] = "AliceHUB/2.5.3"
+            }
+        })
+        if not ok then
+            return nil, tostring(response)
+        end
+
+        if type(response) == "string" then
+            return response
+        end
+
+        if type(response) == "table" then
+            local body = response.Body or response.body or response.ResponseBody
+            local code = tonumber(response.StatusCode or response.Status or response.status_code or response.status)
+            if type(body) == "string" and #body > 0 then
+                if code and code >= 400 then
+                    return body, "HTTP " .. tostring(code)
+                end
+                return body
+            end
+            return nil, "request() response body kosong"
+        end
+
+        return nil, "request() response tidak dikenal"
+    end
+
     local function httpGet(url)
-        -- Most compatible path first: no optional cache argument.
+        -- First try Roblox/executor HttpGet.
         local ok, result = pcall(function()
             return game:HttpGet(url)
         end)
         if ok and type(result) == "string" and #result > 0 then
-            return result
+            return result, nil, "HttpGet"
         end
 
-        -- Some executors implement HttpGet with the cache argument.
         local ok2, result2 = pcall(function()
             return game:HttpGet(url, true)
         end)
         if ok2 and type(result2) == "string" and #result2 > 0 then
-            return result2
+            return result2, nil, "HttpGetCached"
         end
 
-        -- Request API fallback for Lite executors.
-        local req = executorRequest()
-        if req then
-            local ok3, response = pcall(req, {
-                Url = url,
-                URL = url,
-                Method = "GET",
-                Headers = {
-                    ["Cache-Control"] = "no-cache",
-                    ["User-Agent"] = "AliceHUB/2.5.2"
-                }
-            })
-            if ok3 then
-                if type(response) == "string" and #response > 0 then
-                    return response
-                end
-                if type(response) == "table" then
-                    local body = response.Body or response.body
-                    local code = tonumber(response.StatusCode or response.Status or response.status_code)
-                    if type(body) == "string" and #body > 0 and (not code or code < 400) then
-                        return body
-                    end
-                    if type(body) == "string" and #body > 0 then
-                        return body
-                    end
-                end
-            end
+        local body, reqErr = requestBody(url)
+        if type(body) == "string" and #body > 0 then
+            return body, reqErr, "request"
         end
 
-        return nil, tostring(result2 or result or "HTTP unavailable")
+        return nil, tostring(reqErr or result2 or result or "HTTP unavailable"), "none"
     end
 
     local function decode(text)
@@ -189,6 +200,48 @@ return function(token)
         end)
         if ok and type(data) == "table" then return data end
         return nil
+    end
+
+
+    local function responsePreview(value)
+        local s = tostring(value or "")
+        s = s:gsub("[%c]+", " "):gsub("%s+", " ")
+        if #s > 120 then s = s:sub(1, 120) .. "..." end
+        return s
+    end
+
+    local function getJson(url)
+        -- Important for some Lite executors: game:HttpGet can return an
+        -- HTML/proxy page while request() returns the actual Worker JSON.
+        local body, firstErr, firstMethod = httpGet(url)
+        local data = decode(body)
+        if data then
+            return data, nil, firstMethod
+        end
+
+        -- If the first successful transport returned non-JSON, explicitly
+        -- retry with the executor request API instead of accepting that body.
+        if firstMethod ~= "request" then
+            local retryBody, retryErr = requestBody(url)
+            local retryData = decode(retryBody)
+            if retryData then
+                return retryData, nil, "request"
+            end
+
+            local detail = responsePreview(retryBody)
+            if detail == "" then detail = responsePreview(body) end
+            return nil,
+                "API balas non-JSON"
+                .. (detail ~= "" and (": " .. detail) or "")
+                .. (retryErr and (" | " .. tostring(retryErr)) or ""),
+                "request"
+        end
+
+        local detail = responsePreview(body)
+        return nil,
+            "API balas non-JSON" .. (detail ~= "" and (": " .. detail) or "")
+            .. (firstErr and (" | " .. tostring(firstErr)) or ""),
+            firstMethod
     end
 
     local function ensureFolder(path)
@@ -310,18 +363,14 @@ return function(token)
             .. "&placeId=" .. HttpService:UrlEncode(tostring(game.PlaceId))
             .. "&t=" .. HttpService:UrlEncode(tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999)))
 
-        local body, err = httpGet(url)
-        if type(body) ~= "string" then
-            return nil, "HTTP gagal: " .. tostring(err)
-        end
-
-        local data = decode(body)
+        local data, err, method = getJson(url)
         if not data then
-            return nil, "Response API tidak valid"
+            return nil, tostring(err or "Response API tidak valid")
         end
         if not data.ok then
             return nil, tostring(data.error or data.code or "Authorization gagal")
         end
+        Env.AliceHUBLastTransport = method
         if type(data.session) ~= "string" or type(data.lease) ~= "string" then
             return nil, "Session API tidak lengkap"
         end
@@ -395,11 +444,10 @@ return function(token)
 
             local heartbeatOk = false
             if type(lease) == "string" and lease ~= "" then
-                local body = httpGet(
+                local data = select(1, getJson(
                     API .. "/client/heartbeat?lease=" .. HttpService:UrlEncode(lease)
                         .. "&t=" .. HttpService:UrlEncode(tostring(os.time()))
-                )
-                local data = decode(body)
+                ))
                 if data and data.ok then
                     heartbeatOk = true
                     failures = 0
