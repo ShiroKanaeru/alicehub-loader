@@ -1,4 +1,4 @@
--- AliceHUB Loader v2.5.3
+-- AliceHUB Loader v2.5.4
 -- Executor compatibility build
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
@@ -49,7 +49,7 @@ return function(token)
             local frame = Instance.new("Frame")
             frame.AnchorPoint = Vector2.new(0.5, 0)
             frame.Position = UDim2.new(0.5, 0, 0, 18)
-            frame.Size = UDim2.fromOffset(310, 58)
+            frame.Size = UDim2.fromOffset(430, 82)
             frame.BackgroundColor3 = Color3.fromRGB(24, 15, 19)
             frame.BorderSizePixel = 0
             frame.Parent = gui
@@ -78,13 +78,14 @@ return function(token)
             local status = Instance.new("TextLabel")
             status.BackgroundTransparency = 1
             status.Position = UDim2.fromOffset(12, 29)
-            status.Size = UDim2.new(1, -24, 0, 19)
+            status.Size = UDim2.new(1, -24, 0, 44)
             status.Font = Enum.Font.Code
             status.Text = "Starting..."
             status.TextColor3 = Color3.fromRGB(190, 180, 185)
             status.TextSize = 12
             status.TextXAlignment = Enum.TextXAlignment.Left
-            status.TextTruncate = Enum.TextTruncate.AtEnd
+            status.TextYAlignment = Enum.TextYAlignment.Top
+            status.TextWrapped = true
             status.Parent = frame
 
             bootGui = gui
@@ -124,73 +125,172 @@ return function(token)
     end
 
     -- Compatibility HTTP layer.
-    local function executorRequest()
-        if type(request) == "function" then return request end
-        if type(http_request) == "function" then return http_request end
-        if type(http) == "table" and type(http.request) == "function" then return http.request end
-        if type(syn) == "table" and type(syn.request) == "function" then return syn.request end
-        if type(fluxus) == "table" and type(fluxus.request) == "function" then return fluxus.request end
-        return nil
-    end
+    -- Lite executors sometimes expose several HTTP functions, where one of them
+    -- returns an HTML proxy page while another one returns the real API body.
+    local function collectRequestTransports()
+        local list, seen = {}, {}
 
-    local function requestBody(url)
-        local req = executorRequest()
-        if not req then return nil, "request() unavailable" end
-
-        local ok, response = pcall(req, {
-            Url = url,
-            URL = url,
-            Method = "GET",
-            Headers = {
-                ["Cache-Control"] = "no-cache",
-                ["User-Agent"] = "AliceHUB/2.5.3"
-            }
-        })
-        if not ok then
-            return nil, tostring(response)
+        local function add(name, fn)
+            if type(fn) ~= "function" or seen[fn] then return end
+            seen[fn] = true
+            list[#list + 1] = { name = name, fn = fn }
         end
 
+        add("request", request)
+        add("http_request", http_request)
+
+        if type(http) == "table" then
+            add("http.request", http.request)
+        end
+        if type(syn) == "table" then
+            add("syn.request", syn.request)
+        end
+        if type(fluxus) == "table" then
+            add("fluxus.request", fluxus.request)
+        end
+        if type(krnl) == "table" then
+            add("krnl.request", krnl.request)
+        end
+        if type(arceus) == "table" then
+            add("arceus.request", arceus.request)
+        end
+
+        return list
+    end
+
+    local function responseBody(response)
         if type(response) == "string" then
             return response
         end
-
-        if type(response) == "table" then
-            local body = response.Body or response.body or response.ResponseBody
-            local code = tonumber(response.StatusCode or response.Status or response.status_code or response.status)
-            if type(body) == "string" and #body > 0 then
-                if code and code >= 400 then
-                    return body, "HTTP " .. tostring(code)
-                end
-                return body
-            end
-            return nil, "request() response body kosong"
+        if type(response) ~= "table" then
+            return nil
         end
-
-        return nil, "request() response tidak dikenal"
+        return response.Body
+            or response.body
+            or response.ResponseBody
+            or response.responseBody
+            or response.Data
+            or response.data
     end
 
-    local function httpGet(url)
-        -- First try Roblox/executor HttpGet.
-        local ok, result = pcall(function()
-            return game:HttpGet(url)
-        end)
-        if ok and type(result) == "string" and #result > 0 then
-            return result, nil, "HttpGet"
+    local function responseCode(response)
+        if type(response) ~= "table" then return nil end
+        return tonumber(
+            response.StatusCode
+            or response.Status
+            or response.status_code
+            or response.status
+            or response.Code
+            or response.code
+        )
+    end
+
+    local function callRequestTransport(entry, url)
+        local browserHeaders = {
+            ["Accept"] = "application/json,text/plain,*/*",
+            ["Cache-Control"] = "no-cache",
+            ["Pragma"] = "no-cache",
+            ["User-Agent"] = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
+        }
+
+        local variants = {
+            {
+                Url = url,
+                Method = "GET",
+                Headers = browserHeaders
+            },
+            {
+                URL = url,
+                Method = "GET",
+                Headers = browserHeaders
+            },
+            {
+                url = url,
+                method = "GET",
+                headers = browserHeaders
+            }
+        }
+
+        local lastError
+        for _, options in ipairs(variants) do
+            local ok, response = pcall(entry.fn, options)
+            if ok then
+                local body = responseBody(response)
+                local code = responseCode(response)
+                if type(body) == "string" and #body > 0 then
+                    return body, code, nil
+                end
+                lastError = "body kosong"
+            else
+                lastError = tostring(response)
+            end
         end
 
-        local ok2, result2 = pcall(function()
-            return game:HttpGet(url, true)
-        end)
-        if ok2 and type(result2) == "string" and #result2 > 0 then
-            return result2, nil, "HttpGetCached"
+        return nil, nil, lastError or "request gagal"
+    end
+
+    local function rawHttpCandidates(url)
+        local results = {}
+
+        local function push(name, body, code, err)
+            results[#results + 1] = {
+                name = name,
+                body = body,
+                code = code,
+                err = err
+            }
         end
 
-        local body, reqErr = requestBody(url)
-        if type(body) == "string" and #body > 0 then
-            return body, reqErr, "request"
+        -- Roblox HttpGet variants.
+        do
+            local ok, result = pcall(function()
+                return game:HttpGet(url)
+            end)
+            if ok and type(result) == "string" and #result > 0 then
+                push("game:HttpGet", result, 200, nil)
+            else
+                push("game:HttpGet", nil, nil, tostring(result))
+            end
         end
 
-        return nil, tostring(reqErr or result2 or result or "HTTP unavailable"), "none"
+        do
+            local ok, result = pcall(function()
+                return game.HttpGet(game, url)
+            end)
+            if ok and type(result) == "string" and #result > 0 then
+                push("game.HttpGet", result, 200, nil)
+            else
+                push("game.HttpGet", nil, nil, tostring(result))
+            end
+        end
+
+        do
+            local ok, result = pcall(function()
+                return game:HttpGet(url, true)
+            end)
+            if ok and type(result) == "string" and #result > 0 then
+                push("HttpGet(cache)", result, 200, nil)
+            else
+                push("HttpGet(cache)", nil, nil, tostring(result))
+            end
+        end
+
+        -- Try every request-like API instead of stopping at the first global.
+        for _, entry in ipairs(collectRequestTransports()) do
+            local body, code, err = callRequestTransport(entry, url)
+            push(entry.name, body, code, err)
+        end
+
+        return results
+    end
+
+    local function responsePreview(value)
+        local s = tostring(value or "")
+        s = s:gsub("[%c]+", " "):gsub("%s+", " ")
+        if #s > 145 then
+            s = s:sub(1, 145) .. "..."
+        end
+        return s
     end
 
     local function decode(text)
@@ -198,50 +298,73 @@ return function(token)
         local ok, data = pcall(function()
             return HttpService:JSONDecode(text)
         end)
-        if ok and type(data) == "table" then return data end
+        if ok and type(data) == "table" then
+            return data
+        end
         return nil
     end
 
+    local function getJson(url)
+        local candidates = rawHttpCandidates(url)
+        local htmlSamples = {}
+        local errors = {}
 
-    local function responsePreview(value)
-        local s = tostring(value or "")
-        s = s:gsub("[%c]+", " "):gsub("%s+", " ")
-        if #s > 120 then s = s:sub(1, 120) .. "..." end
-        return s
+        for _, result in ipairs(candidates) do
+            if type(result.body) == "string" and #result.body > 0 then
+                local data = decode(result.body)
+                if data then
+                    Env.AliceHUBLastTransport = result.name
+                    return data, nil, result.name
+                end
+
+                local preview = responsePreview(result.body)
+                if preview ~= "" then
+                    htmlSamples[#htmlSamples + 1] = result.name .. ": " .. preview
+                end
+            elseif result.err and result.err ~= "" then
+                errors[#errors + 1] = result.name .. ": " .. responsePreview(result.err)
+            end
+        end
+
+        local detail
+        if #htmlSamples > 0 then
+            detail = htmlSamples[1]
+        elseif #errors > 0 then
+            detail = errors[1]
+        else
+            detail = "tidak ada transport HTTP yang berhasil"
+        end
+
+        return nil, "API non-JSON • " .. detail, nil
     end
 
-    local function getJson(url)
-        -- Important for some Lite executors: game:HttpGet can return an
-        -- HTML/proxy page while request() returns the actual Worker JSON.
-        local body, firstErr, firstMethod = httpGet(url)
-        local data = decode(body)
-        if data then
-            return data, nil, firstMethod
-        end
+    local function httpGet(url)
+        -- For raw payload/image bytes: accept the first non-empty successful body.
+        local candidates = rawHttpCandidates(url)
 
-        -- If the first successful transport returned non-JSON, explicitly
-        -- retry with the executor request API instead of accepting that body.
-        if firstMethod ~= "request" then
-            local retryBody, retryErr = requestBody(url)
-            local retryData = decode(retryBody)
-            if retryData then
-                return retryData, nil, "request"
+        -- Prefer non-HTML bodies for scripts/images.
+        for _, result in ipairs(candidates) do
+            if type(result.body) == "string" and #result.body > 0 then
+                local lower = result.body:sub(1, 300):lower()
+                local looksHtml =
+                    lower:find("<!doctype html", 1, true)
+                    or lower:find("<html", 1, true)
+
+                if not looksHtml then
+                    Env.AliceHUBLastTransport = result.name
+                    return result.body, nil, result.name
+                end
             end
-
-            local detail = responsePreview(retryBody)
-            if detail == "" then detail = responsePreview(body) end
-            return nil,
-                "API balas non-JSON"
-                .. (detail ~= "" and (": " .. detail) or "")
-                .. (retryErr and (" | " .. tostring(retryErr)) or ""),
-                "request"
         end
 
-        local detail = responsePreview(body)
-        return nil,
-            "API balas non-JSON" .. (detail ~= "" and (": " .. detail) or "")
-            .. (firstErr and (" | " .. tostring(firstErr)) or ""),
-            firstMethod
+        -- Last fallback, useful for legitimate textual responses.
+        for _, result in ipairs(candidates) do
+            if type(result.body) == "string" and #result.body > 0 then
+                return result.body, nil, result.name
+            end
+        end
+
+        return nil, "HTTP unavailable", nil
     end
 
     local function ensureFolder(path)
