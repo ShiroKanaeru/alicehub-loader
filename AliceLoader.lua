@@ -1,3 +1,4 @@
+-- AliceHUB Loader
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
 
@@ -49,7 +50,7 @@ return function(token)
         local logoPath = "AliceHUB/BrandLogo.png"
         local assetPath = "AliceHUB/assets/BrandLogo.png"
         local versionPath = "AliceHUB/assets/BrandLogo.version"
-        local wantedVersion = "1"
+        local wantedVersion = "2"
 
         local currentVersion
         if type(readfile) == "function" and type(isfile) == "function" then
@@ -83,6 +84,7 @@ return function(token)
             local okAsset, asset = pcall(getAsset, logoPath)
             if okAsset and type(asset) == "string" and #asset > 0 then
                 Env.AliceHUBLogoAsset = asset
+                Env.AliceHUBBrandLogoAsset = asset
                 Env.AliceHUBLogoPath = logoPath
             end
         end
