@@ -1,4 +1,4 @@
--- AliceHUB Loader v2.5.5
+-- AliceHUB Loader v2.5.6
 -- Executor compatibility build
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
@@ -435,6 +435,27 @@ return function(token)
         if not exists then pcall(makefolder, path) end
     end
 
+    local function validAssetReference(value)
+        if type(value) ~= "string" or value == "" then
+            return false
+        end
+
+        local clean = value:gsub("^%s+", ""):gsub("%s+$", "")
+        if clean == "" or clean:match("^%d+$") then
+            return false
+        end
+
+        if clean:find("://", 1, true) then
+            return true
+        end
+
+        if clean:sub(1, 9) == "rbxasset:" or clean:sub(1, 11) == "rbxassetid:" then
+            return true
+        end
+
+        return false
+    end
+
     local function prepareLogo()
         Env.AliceHUBLogoAsset = FALLBACK_LOGO
         Env.AliceHUBBrandLogoAsset = FALLBACK_LOGO
@@ -479,10 +500,15 @@ return function(token)
         local getAsset = getcustomasset or getsynasset
         if logoExists and type(getAsset) == "function" then
             local ok, asset = pcall(getAsset, logoPath)
-            if ok and type(asset) == "string" and asset ~= "" then
+            if ok and validAssetReference(asset) then
                 Env.AliceHUBLogoAsset = asset
                 Env.AliceHUBBrandLogoAsset = asset
                 Env.AliceHUBLogoPath = logoPath
+                Env.AliceHUBRejectedLogoAsset = nil
+            elseif ok and asset ~= nil then
+                Env.AliceHUBRejectedLogoAsset = tostring(asset)
+                Env.AliceHUBLogoAsset = FALLBACK_LOGO
+                Env.AliceHUBBrandLogoAsset = FALLBACK_LOGO
             end
         end
     end
@@ -685,6 +711,26 @@ return function(token)
     setBoot("Loaded")
     destroyBoot(1.2)
 
-    local okRun, runErr = pcall(chunk)
-    if not okRun then fail("Payload error: " .. tostring(runErr)) end
+    local function payloadTraceback(err)
+        local message = tostring(err)
+        local dbg = debug
+        if type(dbg) == "table" and type(dbg.traceback) == "function" then
+            local okTrace, trace = pcall(dbg.traceback, message, 2)
+            if okTrace and type(trace) == "string" and trace ~= "" then
+                return trace
+            end
+        end
+        return message
+    end
+
+    local okRun, runErr = xpcall(chunk, payloadTraceback)
+    if not okRun then
+        local compact = tostring(runErr or "unknown payload error")
+            :gsub("[%c]+", " ")
+            :gsub("%s+", " ")
+        if #compact > 380 then
+            compact = compact:sub(1, 380) .. "..."
+        end
+        fail("Payload error: " .. compact)
+    end
 end
