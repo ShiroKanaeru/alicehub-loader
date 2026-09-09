@@ -1,5 +1,4 @@
--- AliceHUB Loader v2.5.6
--- Executor compatibility build
+-- AliceHUB Loader v2.5.7
 local API = "https://alicehub-api.shirokanaerus.workers.dev"
 local FALLBACK_LOGO = "rbxassetid://71638246809611"
 
@@ -699,14 +698,113 @@ return function(token)
 
     setBoot("Loading " .. tostring(sessionData.game and sessionData.game.target or "payload") .. "...")
 
-    local payload, payloadErr = httpGet(
-        API .. "/script?session=" .. HttpService:UrlEncode(sessionData.session)
-            .. "&t=" .. HttpService:UrlEncode(tostring(os.time()))
-    )
-    if type(payload) ~= "string" then fail("Payload HTTP gagal: " .. tostring(payloadErr)) end
+    local function payloadLooksHealthy(source)
+        if type(source) ~= "string" or #source < 100 then
+            return false, "payload kosong/terlalu pendek"
+        end
 
-    local chunk, compileError = loadstring(payload)
-    if type(chunk) ~= "function" then fail("Payload compile gagal: " .. tostring(compileError)) end
+        local head = source:sub(1, 400):lower()
+        if head:find("<!doctype html", 1, true) or head:find("<html", 1, true) then
+            return false, "HTML/proxy response"
+        end
+
+        -- Detect transport corruption around GetService("...").
+        -- All AliceHUB payloads use normal Roblox service names here.
+        for _, serviceName in source:gmatch("GetService%s*%(%s*([\"'])(.-)%1%s*%)") do
+            if serviceName == "" or serviceName:find("[^%w_]") then
+                return false, "GetService rusak: " .. tostring(serviceName)
+            end
+        end
+
+        -- Reject obvious binary/control corruption while allowing normal tabs/newlines.
+        local sample = source:sub(1, math.min(#source, 12000))
+        for i = 1, #sample do
+            local b = sample:byte(i)
+            if b == 0 or (b < 9) or (b > 13 and b < 32) then
+                return false, "payload mengandung byte kontrol"
+            end
+        end
+
+        return true
+    end
+
+    local function compilePayloadCandidate(source)
+        local healthy, reason = payloadLooksHealthy(source)
+        if not healthy then
+            return nil, reason
+        end
+
+        local chunk, compileError = loadstring(source)
+        if type(chunk) ~= "function" then
+            return nil, "compile: " .. tostring(compileError)
+        end
+
+        return chunk
+    end
+
+    local function fetchPayloadCompat(url)
+        local attempts = {}
+        local seenBodies = {}
+
+        local function tryBody(name, body)
+            if type(body) ~= "string" or body == "" then
+                attempts[#attempts + 1] = name .. ": kosong"
+                return nil
+            end
+
+            -- Avoid re-checking identical responses from aliased executor functions.
+            local signature = tostring(#body) .. ":" .. body:sub(1, 96)
+            if seenBodies[signature] then
+                return nil
+            end
+            seenBodies[signature] = true
+
+            local chunk, reason = compilePayloadCandidate(body)
+            if chunk then
+                Env.AliceHUBPayloadTransport = name
+                return chunk
+            end
+
+            attempts[#attempts + 1] = name .. ": " .. tostring(reason)
+            return nil
+        end
+
+        -- First priority = exact simple path used before Active Sessions migration.
+        do
+            local ok, body = pcall(function()
+                return game:HttpGet(url)
+            end)
+            if ok then
+                local chunk = tryBody("game:HttpGet", body)
+                if chunk then return chunk end
+            else
+                attempts[#attempts + 1] = "game:HttpGet: " .. tostring(body)
+            end
+        end
+
+        -- Try all alternate HTTP transports only if the old path is unusable.
+        for _, result in ipairs(rawHttpCandidates(url)) do
+            local chunk = tryBody(result.name, result.body)
+            if chunk then return chunk end
+            if not result.body and result.err then
+                attempts[#attempts + 1] =
+                    result.name .. ": " .. responsePreview(result.err)
+            end
+        end
+
+        local summary = table.concat(attempts, " | ")
+        if #summary > 420 then summary = summary:sub(1, 420) .. "..." end
+        return nil, summary ~= "" and summary or "semua transport payload gagal"
+    end
+
+    local payloadUrl =
+        API .. "/script?session=" .. HttpService:UrlEncode(sessionData.session)
+        .. "&t=" .. HttpService:UrlEncode(tostring(os.time()))
+
+    local chunk, payloadErr = fetchPayloadCompat(payloadUrl)
+    if type(chunk) ~= "function" then
+        fail("Payload transport gagal: " .. tostring(payloadErr))
+    end
 
     setBoot("Loaded")
     destroyBoot(1.2)
@@ -731,6 +829,8 @@ return function(token)
         if #compact > 380 then
             compact = compact:sub(1, 380) .. "..."
         end
-        fail("Payload error: " .. compact)
+        local target = tostring(sessionData.game and sessionData.game.target or "?")
+        local transport = tostring(Env.AliceHUBPayloadTransport or "?")
+        fail("Payload error [" .. target .. " / " .. transport .. "]: " .. compact)
     end
 end
